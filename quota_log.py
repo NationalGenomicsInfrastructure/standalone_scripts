@@ -6,7 +6,7 @@ import datetime
 import subprocess
 from platform import node as host_name
 from pprint import pprint
-import couchdb
+from ibmcloudant import CouchDbSessionAuthenticator, cloudant_v1
 
 
 
@@ -46,7 +46,13 @@ if __name__ == "__main__":
     if not args.server:
         pprint(project_list)
     else:
-        couch = couchdb.Server(args.server)
-        db = couch[args.db]
+        user_pass = args.server.split("@")[0]
+        couch = cloudant_v1.CloudantV1(
+            authenticator=CouchDbSessionAuthenticator(
+                user_pass.split(":")[0],
+                user_pass.split(":")[1]
+            )
+        )
+        couch.set_service_url(f"https://{args.server.split('@')[1]}")
         for fs_dict in project_list:
-            db.save(fs_dict)
+            couch.post_document(db=args.db, document=fs_dict).get_result()

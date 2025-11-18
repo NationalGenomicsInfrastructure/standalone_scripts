@@ -10,16 +10,16 @@ import logging.handlers
 import argparse
 import sys
 import datetime
-import couchdb
+from ibmcloudant import CouchDbSessionAuthenticator, cloudant_v1
 import yaml
 import socket
 
-def save_to_statusdb(db, message, args):
+def save_to_statusdb(couch, db, message, args):
     data={'message':message}
     data['timestamp']=datetime.datetime.now().isoformat()
     data['instrument_name']=args.name
 
-    db.save(data)
+    couch.post_document(db=db, document=data).get_result()
 
 
 def read_message(args):
@@ -36,8 +36,14 @@ def read_message(args):
 
 def setupServer(conf):
     db_conf = conf['statusdb']
-    url="https://{0}:{1}@{2}".format(db_conf['username'], db_conf['password'], db_conf['url'])
-    return couchdb.Server(url)
+    url=f"https://{db_conf['url'])}"
+    couch = cloudant_v1.CloudantV1(
+        authenticator=CouchDbSessionAuthenticator(
+            db_conf['username'], db_conf['password']
+        )
+    )
+    couch.set_service_url(url)
+    return couch
 
 def setupLog(name, logfile, log_level=logging.INFO, max_size=209715200, nb_files=5):
     mainlog = logging.getLogger(name)
@@ -56,12 +62,12 @@ def main(args):
         conf=yaml.load(conf_file)
 
     couch=setupServer(conf)
-    db=couch[conf['statusdb']['instrument_logs_db']]
+    db = conf['statusdb']['instrument_logs_db']
 
     message=read_message(args)
     mainlog.info("Read message : {}".format(message))
     try:
-        save_to_statusdb(db, message, args)
+        save_to_statusdb(couch, db, message, args)
     except Exception:
         mainlog.error("Failed to upload to statusdb : {}".format(sys.exc_info()[0]))
     else:

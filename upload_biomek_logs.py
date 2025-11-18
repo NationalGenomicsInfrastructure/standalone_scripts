@@ -5,14 +5,14 @@ import logging
 import logging.handlers
 import argparse
 import os
-import couchdb
+from ibmcloudant import CouchDbSessionAuthenticator, cloudant_v1
 import yaml
 import re
 import sys
 
 error_line_regex = re.compile(r"^(?=\d{2}/\d{1,2}/\d{4} \d{2}:\d{2}:\d{2},\b)")
 
-def create_doc_from_log_file(doc_option, handle, log_file_path, db=None):
+def create_doc_from_log_file(doc_option, handle, couch, log_file_path, db=None):
 
     error_lines = ""
 
@@ -36,7 +36,7 @@ def create_doc_from_log_file(doc_option, handle, log_file_path, db=None):
                         doc["run_finished"] = True          
             doc["errors"] = error_lines
     elif doc_option == "update":
-        doc = db.get(handle)
+        doc = couch.get_document(db=db, doc_id=handle).get_result()
         with open(os.path.join(log_file_path, doc["file_name"]), "r", encoding="utf-8-sig") as inp:
             contents=inp.readlines()
             for line in contents:
@@ -50,8 +50,14 @@ def create_doc_from_log_file(doc_option, handle, log_file_path, db=None):
 
 def setupServer(conf):
     db_conf = conf['statusdb']
-    url="https://{0}:{1}@{2}".format(db_conf['username'], db_conf['password'], db_conf['url'])
-    return couchdb.Server(url)
+    url=f"https://{db_conf['url'])}"
+    couch = cloudant_v1.CloudantV1(
+        authenticator=CouchDbSessionAuthenticator(
+            db_conf['username'], db_conf['password']
+        )
+    )
+    couch.set_service_url(url)
+    return couch
 
 def setupLog(name, logfile, log_level=logging.INFO, max_size=209715200, nb_files=5):
     mainlog = logging.getLogger(name)
@@ -71,11 +77,18 @@ def main(args):
 
     couch = setupServer(conf["couchdb_credentials"])
     inst_id = conf["inst_id"]
-    biomek_logs_db = couch['biomek_logs']
-    db_view_run_finished = biomek_logs_db.view('names/run_finished')
+    biomek_logs_db = "biomek_logs"
+
+    db_view_run_finished = couch.post_view(
+        db=biomek_logs_db,
+        ddoc="names",
+        view="run_finished",
+        include_docs=False,
+    ).get_result()["rows"]
+    
     run_finished_dict = {}
     for row in db_view_run_finished:
-        run_finished_dict[(row.key[0], row.key[1])] = (row.value, row.id)
+        run_finished_dict[(row["key"][0], row["key"][1])] = (row["value"], row["id"])
 
     log_files_list = os.listdir(args.log_file_path)
     logs_to_create = []
@@ -90,12 +103,15 @@ def main(args):
 
 
     for fname in logs_to_create:
-        save_docs.append(create_doc_from_log_file('create', fname, log_file_path=args.log_file_path))
+        save_docs.append(create_doc_from_log_file('create', fname, couch, log_file_path=args.log_file_path))
     
     for doc_id in logs_to_update:
-        save_docs.append(create_doc_from_log_file('update', doc_id, log_file_path=args.log_file_path, db=biomek_logs_db))
+        save_docs.append(create_doc_from_log_file('update', doc_id, couch, log_file_path=args.log_file_path, db=biomek_logs_db))
     try:
-        save_result = biomek_logs_db.update(save_docs)
+        couch.post_bulk_docs(
+            db=biomek_logs_db,
+            bulk_docs=cloudant_v1.BulkDocs(docs=save_docs, new_edits=True),
+        ).get_result()
     except Exception:
         mainlog.error("Failed to upload to statusdb : {}".format(sys.exc_info()[0]))
     else:

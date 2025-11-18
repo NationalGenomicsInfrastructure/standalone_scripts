@@ -9,7 +9,7 @@ import sys
 import os
 import yaml
 
-import couchdb
+from ibmcloudant import CouchDbSessionAuthenticator, cloudant_v1
 import numpy
 import click
 
@@ -44,10 +44,17 @@ def connection():
     pw = config.get("password")
     print("Database server used: https://{}".format(config.get("url")))
     print("LIMS server used: " + BASEURI)
-    couch = couchdb.Server('https://{}:{}@{}'.format(user, pw, config.get("url")))
+    couch = cloudant_v1.CloudantV1(
+        authenticator=CouchDbSessionAuthenticator(
+            user,
+            pw
+        )
+    )
+    couch.set_service_url(f"https://{config.get('url')}")
+
     try:
         print("Connecting to statusDB...")
-        couch.version()
+        couch.get_server_information().get_result()
     except:
         sys.exit("Can't connect to couch server. Username & Password is incorrect, or network is inaccessible.")
     print("Connected!")
@@ -56,17 +63,21 @@ def connection():
 
 def proj_struct(couch, project, target_clusters):
     """"Fetches the structure of a project"""
-    db = couch['x_flowcells']
-    view = db.view('names/project_ids_list')
+    db = "x_flowcells"
+    view = couch.post_view(
+        db=db,
+        ddoc='names',
+        view='project_ids_list'
+    ).get_result()
     fc_track = defaultdict(set)
 
     #Adds flowcells to ALL projects. Due to interactions its easier to just get FCs for ALL projects
-    for rec in view.rows:
-        fc = ''.join(rec.key)
+    for rec in view["rows"]:
+        fc = ''.join(rec["key"])
         fc = unicodedata.normalize('NFKD', fc).encode('ascii','ignore')
-        id = ''.join(rec.id)
+        id = ''.join(rec["id"])
         id = unicodedata.normalize('NFKD', id).encode('ascii','ignore')
-        for projs in rec.value:
+        for projs in rec["value"]:
             projs = ''.join(projs)
             projs = unicodedata.normalize('NFKD', projs).encode('ascii','ignore')
             if fc_track[projs] == set([]):
@@ -78,10 +89,10 @@ def proj_struct(couch, project, target_clusters):
         raise Exception('Error: Project not logged in x_flowcells database!')
     for fc, id in fc_track[project].items():
         try:
-            entry = db[id]['illumina']
+            entry_illumina = couch.get_document(db=db, document_id=id).get_result()['illumina']
         except KeyError:
             print("Error: Illumina table for db entry" , id, "doesn't exist!")
-        entry = db[id]['illumina']['Demultiplex_Stats']['Barcode_lane_statistics']
+        entry = entry_illumina['Demultiplex_Stats']['Barcode_lane_statistics']
         for index in range(0, len(entry)):
             lane = entry[index]['Lane']
             sample = entry[index]['Sample']
