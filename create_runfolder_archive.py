@@ -1,27 +1,57 @@
 #!/usr/bin/env python3
-"""Create a tarball for a single project/lane subset of a run directory."""
+"""Create a tarball of a run directory restricted to one project's lanes.
+
+Only an allowlist of top-level run folder entries is archived (see
+INCLUDED_TOP_LEVEL_ENTRIES); anything else, including Demultiplexing output
+and sample sheets, is left out so that data from other projects cannot leak
+into the archive.
+"""
 
 import argparse
 import csv
 import hashlib
 import os
 import re
-import shutil
+import sys
 import tarfile
-import tempfile
 from pathlib import Path
 
 SAMPLESHEET_DIR_NAME = "Samplesheets"
 LANE_SAMPLESHEET_PATTERN = re.compile(r"SampleSheet_lane_(\d+)_settings_\d+")
 LANE_DIR_PATTERN = re.compile(r"L\d{3}")
 
+# Top-level run folder entries that are copied into the archive. Everything
+# else is skipped (and reported), so new/unknown output never ends up in a
+# delivery by accident.
+INCLUDED_TOP_LEVEL_ENTRIES = {
+    # Directories
+    "Config",
+    "Data",
+    "InterOp",
+    "Logs",
+    "Recipe",
+    "Thumbnail_Images",
+    # Files
+    "CopyComplete.txt",
+    "RTA3.cfg",
+    "RTAComplete.txt",
+    "RunCompletionStatus.xml",
+    "RunInfo.xml",
+    "RunParameters.xml",
+    "runParameters.xml",
+    "SequenceComplete.txt",
+}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Create a tarball of a run directory containing only selected lanes "
-            "for one project, with a filtered SampleSheet.csv. Include only BCL files "
-            "for the selected lanes and exclude Demultiplexing directories by default."
+            "Create a tarball of a run directory for one project, containing only "
+            "the selected lanes. All samples in the selected lanes' sample sheets "
+            "must belong to the project. Only standard run folder entries (Data, "
+            "InterOp, RunInfo.xml, etc.) are included; lane directories for "
+            "unselected lanes, Demultiplexing output and sample sheets are excluded. "
+            "The archive and its .md5 file are written to the current directory."
         )
     )
     parser.add_argument(
@@ -120,50 +150,46 @@ def is_unselected_lane_dir(name: str, selected_lane_dirs: set[str]) -> bool:
     )
 
 
-def should_include_file(
-    src_path: Path, rel_path: Path, selected_lane_dirs: set[str]
-) -> bool:
-    if src_path.name.lower().startswith("samplesheet"):
-        return False
+def is_samplesheet(path: Path) -> bool:
+    return path.name.lower().startswith("samplesheet")
 
-    for part in rel_path.parts:
-        if part.startswith("Demultiplexing"):
-            return False
-        if is_unselected_lane_dir(part, selected_lane_dirs):
-            return False
-    return True
+
+def iter_files_to_archive(run_dir: Path, lane_numbers: set[int]):
+    """Yield files under run_dir that belong in the archive."""
+    selected_lane_dirs = {f"L{lane:03d}" for lane in lane_numbers}
+    skipped = []
+
+    for entry in sorted(run_dir.iterdir()):
+        if entry.name not in INCLUDED_TOP_LEVEL_ENTRIES:
+            skipped.append(entry.name)
+            continue
+
+        if entry.is_symlink() or entry.is_file():
+            if not is_samplesheet(entry):
+                yield entry
+            continue
+
+        for root, dirs, files in os.walk(entry):
+            dirs[:] = sorted(
+                d for d in dirs if not is_unselected_lane_dir(d, selected_lane_dirs)
+            )
+            for filename in sorted(files):
+                src_file = Path(root) / filename
+                if not is_samplesheet(src_file):
+                    yield src_file
+
+    if skipped:
+        print(
+            "Skipped top-level entries not in the allowlist: " + ", ".join(skipped),
+            file=sys.stderr,
+        )
 
 
 def build_run_archive(run_dir: Path, lane_numbers: set[int], output_tar: Path) -> None:
-    selected_lane_dirs = {f"L{lane:03d}" for lane in lane_numbers}
-
-    with tempfile.TemporaryDirectory(prefix="runfolder_subset_") as temp_dir_name:
-        stage_root = Path(temp_dir_name) / run_dir.name
-        stage_root.mkdir(parents=True, exist_ok=True)
-
-        for root, dirs, files in os.walk(run_dir):
-            src_root = Path(root)
-
-            dirs[:] = [
-                d
-                for d in dirs
-                if not d.startswith("Demultiplexing")
-                and not is_unselected_lane_dir(d, selected_lane_dirs)
-            ]
-
-            for filename in files:
-                src_file = src_root / filename
-                rel_file = src_file.relative_to(run_dir)
-
-                if not should_include_file(src_file, rel_file, selected_lane_dirs):
-                    continue
-
-                dest_file = stage_root / rel_file
-                dest_file.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src_file, dest_file)
-
-        with tarfile.open(output_tar, "w:gz") as tar_handle:
-            tar_handle.add(stage_root, arcname=run_dir.name)
+    with tarfile.open(output_tar, "w:gz") as tar_handle:
+        for src_file in iter_files_to_archive(run_dir, lane_numbers):
+            arcname = Path(run_dir.name) / src_file.relative_to(run_dir)
+            tar_handle.add(src_file, arcname=str(arcname), recursive=False)
 
 
 def write_md5sum(archive_path: Path) -> Path:
@@ -181,7 +207,7 @@ def write_md5sum(archive_path: Path) -> Path:
 
 def main() -> None:
     args = parse_args()
-    run_dir = Path.cwd() / args.run
+    run_dir = Path(os.path.abspath(args.run))
     if not run_dir.exists() or not run_dir.is_dir():
         raise FileNotFoundError(f"Run directory not found: {run_dir}")
 
@@ -195,7 +221,7 @@ def main() -> None:
     check_lane_samplesheets_match_project(run_dir, args.project, lane_numbers)
 
     archive_name = (
-        f"{args.run}_{args.project}_"
+        f"{run_dir.name}_{args.project}_"
         + "_".join(str(lane) for lane in sorted(lane_numbers))
         + ".tar.gz"
     )
