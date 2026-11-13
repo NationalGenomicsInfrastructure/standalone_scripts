@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Create a tarball of a run directory restricted to one project's lanes.
+"""Create an uncompressed tar archive of a run directory restricted to one
+project's lanes.
 
 Only an allowlist of top-level run folder entries is archived (see
-INCLUDED_TOP_LEVEL_ENTRIES); anything else, including Demultiplexing output
-and sample sheets, is left out so that data from other projects cannot leak
-into the archive.
+INCLUDED_TOP_LEVEL_ENTRIES); anything else, including Demultiplexing output,
+is left out so that data from other projects cannot leak into the archive.
+All .csv files (including sample sheets) are excluded as well.
 """
 
 import argparse
@@ -27,6 +28,7 @@ INCLUDED_TOP_LEVEL_ENTRIES = {
     # Directories
     "Config",
     "Data",
+    "Images",
     "InterOp",
     "Logs",
     "Recipe",
@@ -46,12 +48,13 @@ INCLUDED_TOP_LEVEL_ENTRIES = {
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Create a tarball of a run directory for one project, containing only "
-            "the selected lanes. All samples in the selected lanes' sample sheets "
-            "must belong to the project. Only standard run folder entries (Data, "
-            "InterOp, RunInfo.xml, etc.) are included; lane directories for "
-            "unselected lanes, Demultiplexing output and sample sheets are excluded. "
-            "The archive and its .md5 file are written to the current directory."
+            "Create an uncompressed tar archive of a run directory for one project, "
+            "containing only the selected lanes. All samples in the selected lanes' "
+            "sample sheets must belong to the project. Only standard run folder "
+            "entries (Data, Images, InterOp, RunInfo.xml, etc.) are included; lane "
+            "directories for unselected lanes, Demultiplexing output and all .csv "
+            "files (including sample sheets) are excluded. The archive and its .md5 "
+            "file are written to the current directory."
         )
     )
     parser.add_argument(
@@ -150,8 +153,10 @@ def is_unselected_lane_dir(name: str, selected_lane_dirs: set[str]) -> bool:
     )
 
 
-def is_samplesheet(path: Path) -> bool:
-    return path.name.lower().startswith("samplesheet")
+def is_excluded_file(path: Path) -> bool:
+    """Exclude all .csv files (sample sheets etc.) and any other sample sheet."""
+    name = path.name.lower()
+    return name.endswith(".csv") or name.startswith("samplesheet")
 
 
 def iter_files_to_archive(run_dir: Path, lane_numbers: set[int]):
@@ -165,7 +170,7 @@ def iter_files_to_archive(run_dir: Path, lane_numbers: set[int]):
             continue
 
         if entry.is_symlink() or entry.is_file():
-            if not is_samplesheet(entry):
+            if not is_excluded_file(entry):
                 yield entry
             continue
 
@@ -175,7 +180,7 @@ def iter_files_to_archive(run_dir: Path, lane_numbers: set[int]):
             )
             for filename in sorted(files):
                 src_file = Path(root) / filename
-                if not is_samplesheet(src_file):
+                if not is_excluded_file(src_file):
                     yield src_file
 
     if skipped:
@@ -186,7 +191,7 @@ def iter_files_to_archive(run_dir: Path, lane_numbers: set[int]):
 
 
 def build_run_archive(run_dir: Path, lane_numbers: set[int], output_tar: Path) -> None:
-    with tarfile.open(output_tar, "w:gz") as tar_handle:
+    with tarfile.open(output_tar, "w") as tar_handle:
         for src_file in iter_files_to_archive(run_dir, lane_numbers):
             arcname = Path(run_dir.name) / src_file.relative_to(run_dir)
             tar_handle.add(src_file, arcname=str(arcname), recursive=False)
@@ -220,11 +225,7 @@ def main() -> None:
 
     check_lane_samplesheets_match_project(run_dir, args.project, lane_numbers)
 
-    archive_name = (
-        f"{run_dir.name}_{args.project}_"
-        + "_".join(str(lane) for lane in sorted(lane_numbers))
-        + ".tar.gz"
-    )
+    archive_name = f"{run_dir.name}_{args.project}.tar"
     archive_path = Path.cwd() / archive_name
 
     build_run_archive(run_dir, lane_numbers, archive_path)
