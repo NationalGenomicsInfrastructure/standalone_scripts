@@ -64,7 +64,7 @@ def parse_args() -> argparse.Namespace:
         "--project", "-p", required=True, help="Project ID to keep, e.g. P12345"
     )
     parser.add_argument(
-        "--include_lanes",
+        "--lanes",
         "-l",
         type=lambda s: [int(item) for item in s.split(",")],
         required=True,
@@ -88,7 +88,12 @@ def find_lane_samplesheets(
 
     missing = sorted(lane for lane, paths in lane_samplesheets.items() if not paths)
     if missing:
-        raise FileNotFoundError(f"No lane sample sheet found for lane(s): {missing}")
+        found = sorted(p.name for p in samplesheet_dir.iterdir()) or ["<empty>"]
+        raise FileNotFoundError(
+            f"No lane sample sheet matching '{LANE_SAMPLESHEET_PATTERN.pattern}' "
+            f"found for lane(s) {missing} in {samplesheet_dir}. Directory contains:\n  "
+            + "\n  ".join(found)
+        )
     return lane_samplesheets
 
 
@@ -105,8 +110,6 @@ def read_bclconvert_sample_names(samplesheet_path: Path) -> list[str]:
             continue
         if not in_data_section or not stripped:
             continue
-        if stripped.startswith("["):
-            break
 
         row = next(csv.reader([stripped]))
         if name_index is None:
